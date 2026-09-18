@@ -29,6 +29,7 @@ export default function App() {
 
   // System config
   const [hasPexelsKey, setHasPexelsKey] = useState<boolean>(false);
+  const [bgMusic, setBgMusic] = useState<boolean>(true);
 
   // Check config on initial load
   useEffect(() => {
@@ -119,6 +120,8 @@ export default function App() {
     if (scenes.length === 0) return;
 
     setIsRendering(true);
+    setVideoUrl(null);
+    setDownloadUrl(null);
     setErrorMessage(null);
     setCurrentStep(3);
     setRenderProgress({
@@ -137,6 +140,7 @@ export default function App() {
           scenes,
           language: detectedLanguage,
           voice,
+          bgMusic,
         }),
       });
 
@@ -298,6 +302,8 @@ export default function App() {
             detectedLanguage={detectedLanguage}
             isAmharic={isAmharic}
             videoTitle={videoTitle}
+            bgMusic={bgMusic}
+            onChangeBgMusic={setBgMusic}
             onChangeVideoTitle={setVideoTitle}
             onUpdateScene={handleUpdateScene}
             onDeleteScene={handleDeleteScene}

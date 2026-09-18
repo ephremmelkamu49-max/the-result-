@@ -29,13 +29,45 @@ export const StepPreviewDownload: React.FC<StepPreviewDownloadProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [copied, setCopied] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  const isReady =
+    !isRendering &&
+    renderProgress?.stage === "completed" &&
+    renderProgress?.progress === 100 &&
+    Boolean(videoUrl && downloadUrl);
+
+  const safeTitle =
+    videoTitle
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "") || "scriptreel-video";
+  const fileName = `${safeTitle}.mp4`;
+  const directDownloadHref = downloadUrl
+    ? `${downloadUrl}?filename=${encodeURIComponent(fileName)}`
+    : "";
 
   const handleCopyLink = () => {
-    if (!videoUrl) return;
-    const fullUrl = `${window.location.origin}${videoUrl}`;
+    if (!downloadUrl && !videoUrl) return;
+    const targetUrl = directDownloadHref || videoUrl || "";
+    const fullUrl = targetUrl.startsWith("http") ? targetUrl : `${window.location.origin}${targetUrl}`;
     navigator.clipboard.writeText(fullUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
+  };
+
+  const handleDirectDownload = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!isReady || !downloadUrl) {
+      e.preventDefault();
+      return;
+    }
+    // Direct native browser download — streams straight from server to disk/phone without memory bloat
+    setIsDownloading(true);
+    setTimeout(() => {
+      setIsDownloading(false);
+    }, 3000);
   };
 
   return (
@@ -54,15 +86,25 @@ export const StepPreviewDownload: React.FC<StepPreviewDownloadProps> = ({
             ScriptReel is running the multi-stage pipeline on the server: generating natural narration, timing video loops, and burning captions.
           </p>
 
+          {/* Scene counter badge during processing */}
+          {renderProgress?.totalScenes ? (
+            <div className="mt-4 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-xs font-medium text-neutral-300">
+              <span className="w-2 h-2 rounded-full bg-indigo-400 animate-pulse" />
+              <span>
+                Scene {renderProgress.currentScene || 1} of {renderProgress.totalScenes}
+              </span>
+            </div>
+          ) : null}
+
           {/* Progress bar */}
-          <div className="mt-8 space-y-2">
+          <div className="mt-6 space-y-2">
             <div className="flex justify-between items-center text-xs text-neutral-300 font-semibold px-1">
               <span>{renderProgress?.message || "Processing video..."}</span>
-              <span className="text-indigo-400">{renderProgress?.progress || 10}%</span>
+              <span className="text-indigo-400 font-mono">{renderProgress?.progress || 10}%</span>
             </div>
             <div className="w-full bg-neutral-950 rounded-full h-3.5 p-0.5 border border-neutral-800 overflow-hidden">
               <div
-                className="bg-gradient-to-r from-indigo-500 to-indigo-400 h-full rounded-full transition-all duration-500 shadow-sm"
+                className="bg-gradient-to-r from-indigo-500 to-indigo-400 h-full rounded-full transition-all duration-300 shadow-sm"
                 style={{ width: `${Math.max(5, renderProgress?.progress || 10)}%` }}
               />
             </div>
@@ -193,7 +235,7 @@ export const StepPreviewDownload: React.FC<StepPreviewDownloadProps> = ({
                 id="edit-scenes-again-btn"
                 type="button"
                 onClick={onEditScenes}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-xs font-medium border border-neutral-800 transition-colors"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-neutral-300 text-xs font-medium border border-neutral-800 transition-colors"
               >
                 <ArrowLeft className="w-3.5 h-3.5" />
                 <span>Edit Scenes</span>
@@ -201,12 +243,26 @@ export const StepPreviewDownload: React.FC<StepPreviewDownloadProps> = ({
 
               <a
                 id="download-video-btn"
-                href={downloadUrl || videoUrl}
-                download={`scriptreel-${videoTitle.toLowerCase().replace(/[^a-z0-9]/g, "-")}.mp4`}
-                className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white text-xs sm:text-sm font-semibold shadow-lg shadow-indigo-600/30 transition-all cursor-pointer"
+                href={isReady ? directDownloadHref : undefined}
+                download={fileName}
+                onClick={handleDirectDownload}
+                className={`inline-flex items-center gap-2 px-5 py-2.5 rounded-xl text-xs sm:text-sm font-semibold shadow-lg transition-all ${
+                  isReady && !isDownloading
+                    ? "bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white shadow-indigo-600/30 cursor-pointer"
+                    : "bg-neutral-800 text-neutral-500 border border-neutral-700 pointer-events-none shadow-none"
+                }`}
               >
-                <Download className="w-4 h-4" />
-                <span>Download MP4</span>
+                {isDownloading ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin text-indigo-300" />
+                    <span>Saving Video...</span>
+                  </>
+                ) : (
+                  <>
+                    <Download className="w-4 h-4" />
+                    <span>Download 1080p MP4</span>
+                  </>
+                )}
               </a>
             </div>
           </div>
@@ -226,10 +282,10 @@ export const StepPreviewDownload: React.FC<StepPreviewDownloadProps> = ({
           <div className="bg-neutral-900/80 border border-neutral-800 rounded-2xl p-5 grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div className="space-y-1">
               <span className="text-[11px] font-semibold text-neutral-400 uppercase tracking-wider">
-                Video Specifications
+                Master 1080p Specifications
               </span>
-              <p className="text-xs text-neutral-200 font-medium">1280 × 720 HD · 16:9 Widescreen</p>
-              <p className="text-[11px] text-neutral-400">H.264 / AAC MP4 Container · 30 FPS</p>
+              <p className="text-xs text-neutral-200 font-medium">1920 × 1080 Full HD · 16:9 Widescreen</p>
+              <p className="text-[11px] text-neutral-400">H.264 High Profile · 8 Mbps · Smooth Crossfades & Ken Burns</p>
             </div>
 
             <div className="space-y-1">

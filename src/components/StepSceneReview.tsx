@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Scene, VideoClip } from "../types.js";
-import { Film, Sparkles, Upload, RefreshCw, Trash2, Plus, ArrowLeft, ArrowRight, Play, Edit3, Check, Volume2, AlertCircle } from "lucide-react";
+import { Film, Sparkles, Upload, RefreshCw, Trash2, Plus, ArrowLeft, ArrowRight, Play, Edit3, Check, Volume2, Music, Wand2, CheckCircle2, AlertCircle } from "lucide-react";
 import { MediaSearchModal } from "./MediaSearchModal.js";
 
 interface StepSceneReviewProps {
@@ -8,6 +8,8 @@ interface StepSceneReviewProps {
   detectedLanguage: string;
   isAmharic: boolean;
   videoTitle: string;
+  bgMusic: boolean;
+  onChangeBgMusic: (enabled: boolean) => void;
   onChangeVideoTitle: (title: string) => void;
   onUpdateScene: (sceneId: string, updated: Partial<Scene>) => void;
   onDeleteScene: (sceneId: string) => void;
@@ -22,6 +24,8 @@ export const StepSceneReview: React.FC<StepSceneReviewProps> = ({
   detectedLanguage,
   isAmharic,
   videoTitle,
+  bgMusic,
+  onChangeBgMusic,
   onChangeVideoTitle,
   onUpdateScene,
   onDeleteScene,
@@ -299,6 +303,61 @@ export const StepSceneReview: React.FC<StepSceneReviewProps> = ({
           <Plus className="w-4 h-4 text-indigo-400" />
           <span>Add Another Scene</span>
         </button>
+      </div>
+
+      {/* Auto-Editing & Audio Controls Panel */}
+      <div className="mt-8 p-4 sm:p-5 rounded-2xl bg-neutral-900/90 border border-neutral-800">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-start sm:items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-indigo-950/60 border border-indigo-800/40 text-indigo-400 flex items-center justify-center shrink-0">
+              <Music className="w-5 h-5" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-xs sm:text-sm font-semibold text-white">Background Music Track</span>
+                <span className="text-[10px] font-medium px-2 py-0.2 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+                  Ambient Chill
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400 mt-0.5">
+                Low-volume ambient music smoothly ducked under narration with 1s fade-in / 2s fade-out.
+              </p>
+            </div>
+          </div>
+
+          <label className="relative inline-flex items-center cursor-pointer shrink-0">
+            <input
+              id="bg-music-toggle"
+              type="checkbox"
+              checked={bgMusic}
+              onChange={(e) => onChangeBgMusic(e.target.checked)}
+              className="sr-only peer"
+            />
+            <div className="w-11 h-6 bg-neutral-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-neutral-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+            <span className="ml-2 text-xs font-medium text-neutral-300">
+              {bgMusic ? "Enabled" : "Off"}
+            </span>
+          </label>
+        </div>
+
+        <div className="mt-4 pt-3.5 border-t border-neutral-800/80 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px] text-neutral-300">
+          <div className="flex items-center gap-1.5">
+            <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            <span>1080p Master (CRF 19)</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            <span>Ken Burns Pan & Zoom</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            <span>0.5s Scene Crossfades</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <CheckCircle2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+            <span>Animated ASS Captions</span>
+          </div>
+        </div>
       </div>
 
       {/* Navigation Footer */}

@@ -1,35 +1,51 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
-import { splitScriptIntoScenes, generateNarrationTTS, getGeminiClient } from "./server/gemini.js";
-import { searchPexelsVideos } from "./server/pexels.js";
-import { downloadFile, createAssSubtitleFile, renderSceneClip, assembleFinalVideo, SceneRenderItem } from "./server/ffmpeg.js";
+import { splitScriptIntoScenes, generateNarrationTTS, getGeminiClient } from "./server/gemini.ts";
+import { searchPexelsVideos } from "./server/pexels.ts";
+import { downloadFile, createAssSubtitleFile, renderSceneClip, assembleFinalVideo } from "./server/ffmpeg.ts";
+import type { SceneRenderItem } from "./server/ffmpeg.ts";
 import { GenerateVideosOperation } from "@google/genai";
 
 dotenv.config();
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const PORT = 3000;
+const ROOT_DIR = process.cwd();
+// Port 3000 is required by the development reverse proxy layer.
+// Cloud Run services pass their designated listen port in process.env.PORT (typically 8080).
+const DEFAULT_PORT = 3000;
+const CLOUD_RUN_PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
 const app = express();
 
-// Set up directories for media and output
-const STORAGE_DIR = path.join(__dirname, "storage");
+// Set up directories for media and output safely
+const STORAGE_DIR = path.join(ROOT_DIR, "storage");
 const UPLOADS_DIR = path.join(STORAGE_DIR, "uploads");
 const RENDERS_DIR = path.join(STORAGE_DIR, "renders");
 const TEMP_DIR = path.join(STORAGE_DIR, "temp");
+const ASSETS_DIR = path.join(STORAGE_DIR, "assets");
 
-fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-fs.mkdirSync(RENDERS_DIR, { recursive: true });
-fs.mkdirSync(TEMP_DIR, { recursive: true });
+try {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  fs.mkdirSync(RENDERS_DIR, { recursive: true });
+  fs.mkdirSync(TEMP_DIR, { recursive: true });
+  fs.mkdirSync(ASSETS_DIR, { recursive: true });
+} catch (e) {
+  console.warn("Storage directory initialization warning:", e);
+}
 
 // Middleware
 app.use(express.json({ limit: "60mb" }));
 app.use(express.urlencoded({ extended: true, limit: "60mb" }));
+
+// Liveness & health check endpoints for Cloud Run container probes
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
+});
+
+app.get("/api/health", (req, res) => {
+  res.status(200).json({ status: "healthy", timestamp: new Date().toISOString() });
+});
 
 // In-memory render job status tracking
 interface RenderJob {
@@ -247,27 +263,49 @@ app.get("/api/video/progress/:jobId", (req, res) => {
   res.json(job);
 });
 
-// 6. Main Video Rendering Pipeline
+// Helper function for parallel processing with controlled concurrency
+async function runWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let currentIndex = 0;
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (currentIndex < items.length) {
+      const idx = currentIndex++;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+
+  await Promise.all(workers);
+  return results;
+}
+
+// 6. Main Video Rendering Pipeline (Background job with parallel per-scene processing)
 app.post("/api/video/render", async (req, res) => {
   const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(7)}`;
-  const { scenes, language = "Amharic", voice = "Charon" } = req.body;
+  const { scenes, language = "Amharic", voice = "Charon", bgMusic = true } = req.body;
 
   if (!Array.isArray(scenes) || scenes.length === 0) {
     return res.status(400).json({ error: "At least one scene is required" });
   }
+
+  const totalScenes = scenes.length;
 
   // Initialize job tracking
   const initialJob: RenderJob = {
     id: jobId,
     stage: "audio",
     progress: 5,
-    message: "Initializing narration audio generation...",
+    message: `Starting 1080p render pipeline for ${totalScenes} scene(s)...`,
     currentScene: 0,
-    totalScenes: scenes.length,
+    totalScenes,
   };
   renderJobs.set(jobId, initialJob);
 
-  // Return jobId immediately so the frontend can display real-time progress
+  // Return jobId immediately so the client can display real-time progress without timeouts
   res.json({ jobId, message: "Render job initiated" });
 
   // Execute rendering in the background
@@ -276,127 +314,156 @@ app.post("/api/video/render", async (req, res) => {
     await fs.promises.mkdir(jobTempDir, { recursive: true });
 
     try {
-      const sceneRenderItems: SceneRenderItem[] = [];
-      let totalDuration = 0;
-      const subtitleScenes: { narration: string; startTime: number; endTime: number }[] = [];
+      let completedScenesCount = 0;
 
-      // Step 1: Generate TTS narration audio for each scene
-      for (let i = 0; i < scenes.length; i++) {
-        const scene = scenes[i];
-        const sceneNum = i + 1;
+      // Process scenes with controlled concurrency (4 parallel workers for TTS + footage + clip rendering)
+      const sceneResults = await runWithConcurrency(scenes, 4, async (scene, idx) => {
+        const sceneNum = idx + 1;
 
-        renderJobs.set(jobId, {
-          ...initialJob,
-          stage: "audio",
-          currentScene: sceneNum,
-          progress: Math.round(5 + (i / scenes.length) * 30),
-          message: `Synthesizing narration for Scene ${sceneNum} of ${scenes.length}...`,
-        });
-
+        // 1. Synthesize TTS narration audio
         const sceneAudioFile = path.join(jobTempDir, `audio_scene_${sceneNum}.wav`);
         const ttsResult = await generateNarrationTTS(
           scene.narration,
           sceneAudioFile,
           voice === "Fenrir" ? "Fenrir" : "Charon"
         );
+        const sceneDuration = Math.max(2.5, ttsResult.durationSeconds);
 
-        const sceneDuration = Math.max(3, ttsResult.durationSeconds);
-        const startTime = totalDuration;
-        const endTime = totalDuration + sceneDuration;
-        totalDuration = endTime;
+        // 2. Obtain visual media (cached or downloaded)
+        const mediaUrl = scene.selectedClip?.videoUrl || "";
+        const mediaType = scene.selectedClip?.mediaType || "video";
+        const rawMediaExt = mediaType === "image" ? ".jpg" : ".mp4";
+        const rawMediaPath = path.join(jobTempDir, `raw_media_scene_${sceneNum}${rawMediaExt}`);
 
-        subtitleScenes.push({
-          narration: scene.narration,
-          startTime,
-          endTime,
-        });
+        let effectiveUrl = mediaUrl;
+        if (effectiveUrl.startsWith("/api/media/")) {
+          effectiveUrl = path.join(UPLOADS_DIR, path.basename(effectiveUrl));
+        }
 
-        sceneRenderItems.push({
-          id: scene.id,
+        await downloadFile(effectiveUrl, rawMediaPath);
+
+        // 3. Render standardized clip with FFmpeg (1080p, 30fps, Ken Burns for images)
+        const sceneClipOutput = path.join(jobTempDir, `rendered_scene_${sceneNum}.mp4`);
+        const renderItem: SceneRenderItem = {
+          id: scene.id || `scene-${sceneNum}`,
           order: sceneNum,
           narration: scene.narration,
-          videoUrl: scene.selectedClip?.videoUrl || "",
-          mediaType: scene.selectedClip?.mediaType || "video",
+          videoUrl: mediaUrl,
+          mediaType,
           duration: sceneDuration,
           audioPath: sceneAudioFile,
-        });
-      }
+        };
 
-      // Step 2: Download visual assets and render each scene clip with FFmpeg
-      const renderedSceneFiles: string[] = [];
+        await renderSceneClip(renderItem, rawMediaPath, sceneClipOutput);
 
-      for (let i = 0; i < sceneRenderItems.length; i++) {
-        const item = sceneRenderItems[i];
-        const sceneNum = i + 1;
+        // 4. Release raw media download immediately to prevent disk exhaustion on long videos
+        try {
+          if (fs.existsSync(rawMediaPath)) {
+            await fs.promises.unlink(rawMediaPath);
+          }
+        } catch {
+          // ignore cleanup of raw media
+        }
 
+        // 5. Update progress in real-time
+        completedScenesCount++;
         renderJobs.set(jobId, {
           ...initialJob,
           stage: "video",
-          currentScene: sceneNum,
-          progress: Math.round(35 + (i / sceneRenderItems.length) * 45),
-          message: `Processing visual footage & audio sync for Scene ${sceneNum} of ${sceneRenderItems.length}...`,
+          currentScene: completedScenesCount,
+          totalScenes,
+          progress: Math.round(10 + (completedScenesCount / totalScenes) * 75),
+          message: `Scene ${completedScenesCount}/${totalScenes} complete (Ken Burns & 1080p master synced)`,
         });
 
-        // Determine local source file
-        const rawMediaExt = item.mediaType === "image" ? ".jpg" : ".mp4";
-        const rawMediaPath = path.join(jobTempDir, `raw_media_scene_${sceneNum}${rawMediaExt}`);
+        return {
+          order: sceneNum,
+          narration: scene.narration,
+          duration: sceneDuration,
+          sceneClipOutput,
+        };
+      });
 
-        let mediaUrl = item.videoUrl;
-        // If relative media URL
-        if (mediaUrl.startsWith("/api/media/")) {
-          const localFile = path.join(UPLOADS_DIR, path.basename(mediaUrl));
-          mediaUrl = localFile;
-        }
+      // Sort results by original scene order to ensure exact sequential flow
+      sceneResults.sort((a, b) => a.order - b.order);
 
-        await downloadFile(mediaUrl, rawMediaPath);
+      // Compute sequential timeline for captions (accounting for 0.5s transition overlaps)
+      const transOverlap = sceneResults.length > 1 ? 0.5 : 0;
+      let totalDuration = 0;
+      const subtitleScenes = sceneResults.map((s, idx) => {
+        const startTime = totalDuration;
+        const endTime = totalDuration + s.duration;
+        totalDuration = endTime - (idx < sceneResults.length - 1 ? transOverlap : 0);
+        return {
+          narration: s.narration,
+          startTime,
+          endTime,
+        };
+      });
 
-        const sceneClipOutput = path.join(jobTempDir, `rendered_scene_${sceneNum}.mp4`);
-        await renderSceneClip(item, rawMediaPath, sceneClipOutput);
-        renderedSceneFiles.push(sceneClipOutput);
-      }
+      const renderedSceneFiles = sceneResults.map((s) => s.sceneClipOutput);
+      const sceneDurations = sceneResults.map((s) => s.duration);
 
       // Step 3: Create ASS subtitle file with animated captions
       renderJobs.set(jobId, {
         ...initialJob,
         stage: "captions",
-        currentScene: scenes.length,
-        progress: 85,
-        message: "Burning in synchronized animated captions...",
+        currentScene: totalScenes,
+        totalScenes,
+        progress: 88,
+        message: "Burning in 1080p animated captions & Ken Burns transitions...",
       });
 
       const assFilePath = path.join(jobTempDir, "captions.ass");
       await createAssSubtitleFile(subtitleScenes, assFilePath);
 
-      // Step 4: Assemble final video
+      // Step 4: Assemble final video (crossfade transitions + background music + 1080p encode)
       renderJobs.set(jobId, {
         ...initialJob,
         stage: "concat",
-        progress: 92,
-        message: "Assembling full video and finalizing MP4 container...",
+        currentScene: totalScenes,
+        totalScenes,
+        progress: 93,
+        message: bgMusic ? "Mixing background music & rendering transitions..." : "Rendering smooth crossfades...",
       });
 
       const finalVideoPath = path.join(RENDERS_DIR, `${jobId}.mp4`);
-      await assembleFinalVideo(renderedSceneFiles, assFilePath, finalVideoPath, jobTempDir);
+      await assembleFinalVideo({
+        scenePaths: renderedSceneFiles,
+        sceneDurations,
+        assSubtitlePath: assFilePath,
+        finalOutputPath: finalVideoPath,
+        tempDir: jobTempDir,
+        bgMusicEnabled: bgMusic !== false,
+        bgMusicPath: path.join(ASSETS_DIR, "bg_ambient.mp3"),
+      });
 
-      // Completed!
+      // Step 5: Mark complete and expose download/stream URLs ONLY when final video is 100% written
+      const stat = await fs.promises.stat(finalVideoPath);
+      if (stat.size === 0) {
+        throw new Error("Final video output file is empty.");
+      }
+
       const videoUrl = `/api/video/stream/${jobId}`;
       const downloadUrl = `/api/video/download/${jobId}`;
 
       renderJobs.set(jobId, {
-        ...initialJob,
+        id: jobId,
         stage: "completed",
         progress: 100,
-        message: "Video rendering complete! Ready to preview & download.",
+        message: "1080p Video rendering complete! Ready to preview & download.",
+        currentScene: totalScenes,
+        totalScenes,
         videoUrl,
         downloadUrl,
         duration: Math.round(totalDuration),
       });
 
-      // Cleanup temp directory after slight delay
+      // Cleanup temp scene directory after slight delay, while preserving the final video in RENDERS_DIR
       setTimeout(async () => {
         try {
           await fs.promises.rm(jobTempDir, { recursive: true, force: true });
-        } catch (e) {
+        } catch {
           // ignore cleanup errors
         }
       }, 60000);
@@ -415,7 +482,8 @@ app.post("/api/video/render", async (req, res) => {
 
 // Stream video with HTTP 206 partial content support for seekable video playback in browser
 app.get("/api/video/stream/:id", (req, res) => {
-  const filePath = path.join(RENDERS_DIR, `${req.params.id}.mp4`);
+  const cleanId = path.basename(req.params.id);
+  const filePath = path.join(RENDERS_DIR, `${cleanId}.mp4`);
   if (!fs.existsSync(filePath)) {
     return res.status(404).send("Video not found");
   }
@@ -449,14 +517,40 @@ app.get("/api/video/stream/:id", (req, res) => {
   }
 });
 
-// Download video file as attachment
+// Download video directly from server storage straight to phone/desktop download manager without browser memory bloat
 app.get("/api/video/download/:id", (req, res) => {
-  const filePath = path.join(RENDERS_DIR, `${req.params.id}.mp4`);
+  const cleanId = path.basename(req.params.id);
+  const filePath = path.join(RENDERS_DIR, `${cleanId}.mp4`);
   if (!fs.existsSync(filePath)) {
-    return res.status(404).send("Video not found");
+    return res.status(404).json({ error: "Video file not found or render has not completed yet." });
   }
 
-  res.download(filePath, `scriptreel-narration-${req.params.id}.mp4`);
+  const stat = fs.statSync(filePath);
+  if (stat.size === 0) {
+    return res.status(425).json({ error: "Video file is still being finalized on the server." });
+  }
+
+  // Allow custom filename query parameter, e.g. ?filename=my-video.mp4
+  let filename = req.query.filename as string;
+  if (!filename || typeof filename !== "string") {
+    filename = `scriptreel-${cleanId}.mp4`;
+  } else {
+    // Sanitize filename and ensure .mp4 extension
+    filename = filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+    if (!filename.endsWith(".mp4")) {
+      filename += ".mp4";
+    }
+  }
+
+  const encodedFilename = encodeURIComponent(filename);
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"; filename*=UTF-8''${encodedFilename}`);
+  res.setHeader("Content-Type", "video/mp4");
+  res.setHeader("Content-Length", stat.size);
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Cache-Control", "public, max-age=86400");
+
+  const fileStream = fs.createReadStream(filePath);
+  fileStream.pipe(res);
 });
 
 // -------------------------------------------------------------
@@ -473,13 +567,41 @@ async function startServer() {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      const indexPath = path.join(distPath, "index.html");
+      if (fs.existsSync(indexPath)) {
+        res.sendFile(indexPath);
+      } else {
+        res.status(200).send("<!doctype html><html><body><div id='root'></div><script>location.reload()</script></body></html>");
+      }
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`ScriptReel server running on http://0.0.0.0:${PORT}`);
+  // Primary listener on port 3000 (required by AI Studio dev environment Nginx reverse proxy)
+  const defaultServer = app.listen(DEFAULT_PORT, "0.0.0.0", () => {
+    console.log(`ScriptReel server active on http://0.0.0.0:${DEFAULT_PORT}`);
   });
+  defaultServer.on("error", (err: any) => {
+    console.warn(`Default port ${DEFAULT_PORT} notice:`, err.message);
+  });
+
+  // Secondary listener on CLOUD_RUN_PORT (typically 8080) for standalone Cloud Run deployments
+  if (CLOUD_RUN_PORT && CLOUD_RUN_PORT !== DEFAULT_PORT) {
+    try {
+      const cloudRunServer = app.listen(CLOUD_RUN_PORT, "0.0.0.0", () => {
+        console.log(`ScriptReel Cloud Run listener active on http://0.0.0.0:${CLOUD_RUN_PORT}`);
+      });
+      cloudRunServer.on("error", (err: any) => {
+        // In local dev container, port 8080 is already bound by Nginx, which is expected
+        if (err.code === "EADDRINUSE") {
+          console.log(`Port ${CLOUD_RUN_PORT} already used by container reverse proxy; continuing on port ${DEFAULT_PORT}.`);
+        } else {
+          console.warn(`Cloud Run port ${CLOUD_RUN_PORT} notice:`, err.message);
+        }
+      });
+    } catch (e: any) {
+      console.log(`Cloud Run listener notice:`, e?.message);
+    }
+  }
 }
 
 startServer();

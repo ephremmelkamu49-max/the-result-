@@ -1,5 +1,6 @@
 import React from "react";
 import { Film, Sparkles, CheckCircle2, ChevronRight, KeyRound } from "lucide-react";
+import { PWAInstallButton } from "./PWAInstallButton.tsx";
 
 interface HeaderProps {
   currentStep: 1 | 2 | 3;
@@ -106,10 +107,12 @@ export const Header: React.FC<HeaderProps> = ({
           })}
         </nav>
 
-        {/* Status badges */}
-        <div className="hidden lg:flex items-center gap-2.5">
+        {/* Status badges & Install App Button */}
+        <div className="flex items-center gap-2 sm:gap-2.5">
+          <PWAInstallButton />
+
           <div
-            className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border ${
+            className={`hidden md:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border ${
               hasPexelsKey
                 ? "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"
                 : "bg-amber-500/10 text-amber-400 border-amber-500/20"
@@ -124,9 +127,9 @@ export const Header: React.FC<HeaderProps> = ({
             <span>{hasPexelsKey ? "Pexels Live API" : "Pexels Stock Ready"}</span>
           </div>
 
-          <div className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
+          <div className="hidden lg:flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">
             <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-            <span>Gemini TTS & Veo</span>
+            <span>1080p AI Studio</span>
           </div>
         </div>
       </div>

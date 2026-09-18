@@ -1,4 +1,4 @@
-import { VideoClip } from "../src/types.js";
+import type { VideoClip } from "../src/types.ts";
 
 // Curated high quality royalty-free video clips from Pexels CDN for fallback when Pexels API key is not configured or query yields zero results
 const SAMPLE_FALLBACK_CLIPS: VideoClip[] = [
@@ -138,12 +138,21 @@ export async function searchPexelsVideos(
     }
 
     const clips: VideoClip[] = videos.map((v: any) => {
-      // Find optimal resolution: 720p or 1080p mp4
+      // Find highest resolution MP4 file: prioritize 1080p (1920x1080) or 4K, avoid low-res previews
       const files: any[] = v.video_files || [];
-      const bestFile =
-        files.find((f: any) => f.quality === "hd" && f.width >= 1280 && f.file_type === "video/mp4") ||
-        files.find((f: any) => f.quality === "sd" && f.file_type === "video/mp4") ||
-        files[0];
+      const mp4Files = files.filter(
+        (f: any) => f.file_type === "video/mp4" || (f.link && f.link.includes(".mp4"))
+      );
+
+      // Sort descending by resolution (width * height) so highest quality is always first
+      mp4Files.sort((a: any, b: any) => {
+        const resA = (a.width || 0) * (a.height || 0);
+        const resB = (b.width || 0) * (b.height || 0);
+        return resB - resA;
+      });
+
+      // Best file is highest resolution MP4 (1080p or higher)
+      const bestFile = mp4Files[0] || files[0];
 
       return {
         id: v.id,
