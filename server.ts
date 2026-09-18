@@ -12,10 +12,6 @@ import { GenerateVideosOperation } from "@google/genai";
 dotenv.config();
 
 const ROOT_DIR = process.cwd();
-// Port 3000 is required by the development reverse proxy layer.
-// Cloud Run services pass their designated listen port in process.env.PORT (typically 8080).
-const DEFAULT_PORT = 3000;
-const CLOUD_RUN_PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
 const app = express();
 
 // Set up directories for media and output safely
@@ -553,53 +549,97 @@ app.get("/api/video/download/:id", (req, res) => {
   fileStream.pipe(res);
 });
 
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});
+process.on("uncaughtException", (error) => {
+  console.error("Uncaught Exception thrown:", error);
+});
+
 // -------------------------------------------------------------
-// VITE / STATIC SERVING
+// VITE / STATIC SERVING & PORT BINDING
 // -------------------------------------------------------------
 async function startServer() {
-  if (process.env.NODE_ENV !== "production") {
+  const isCjsBundle = typeof __filename !== "undefined" && __filename.endsWith("server.cjs");
+  
+  // Search for the dist directory across common execution contexts
+  const candidateDirs = [
+    path.join(process.cwd(), "dist"),
+    process.cwd(),
+    typeof __dirname !== "undefined" ? __dirname : "",
+    typeof __dirname !== "undefined" ? path.join(__dirname, "..", "dist") : "",
+  ].filter(Boolean);
+
+  let resolvedDistPath = path.join(process.cwd(), "dist");
+  let resolvedIndexPath = path.join(resolvedDistPath, "index.html");
+  let hasBuiltAssets = false;
+
+  for (const dir of candidateDirs) {
+    const candidateIndex = path.join(dir, "index.html");
+    if (fs.existsSync(candidateIndex)) {
+      resolvedDistPath = dir;
+      resolvedIndexPath = candidateIndex;
+      hasBuiltAssets = true;
+      break;
+    }
+  }
+
+  const isProduction = process.env.NODE_ENV === "production" || isCjsBundle || hasBuiltAssets;
+
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    app.use(express.static(resolvedDistPath));
     app.get("*", (req, res) => {
-      const indexPath = path.join(distPath, "index.html");
-      if (fs.existsSync(indexPath)) {
-        res.sendFile(indexPath);
+      if (fs.existsSync(resolvedIndexPath)) {
+        res.sendFile(resolvedIndexPath);
       } else {
         res.status(200).send("<!doctype html><html><body><div id='root'></div><script>location.reload()</script></body></html>");
       }
     });
   }
 
-  // Primary listener on port 3000 (required by AI Studio dev environment Nginx reverse proxy)
-  const defaultServer = app.listen(DEFAULT_PORT, "0.0.0.0", () => {
-    console.log(`ScriptReel server active on http://0.0.0.0:${DEFAULT_PORT}`);
+  // Detect environment:
+  // In AI Studio Dev Sandbox: NGINX_PORT (8080) and CONTROL_PLANE_PORT (8000) are set.
+  // The Nginx reverse proxy routes external traffic exclusively to port 3000.
+  // In Cloud Run Production: No Nginx proxy; Cloud Run passes PORT (typically 8080) and routes directly to it.
+  const isDevSandbox = Boolean(process.env.NGINX_PORT || process.env.CONTROL_PLANE_PORT);
+  const cloudRunTargetPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 8080;
+  
+  const primaryPort = isDevSandbox ? 3000 : cloudRunTargetPort;
+  const secondaryPort = primaryPort === 3000 ? cloudRunTargetPort : 3000;
+
+  // Primary listener
+  const primaryServer = app.listen(primaryPort, "0.0.0.0", () => {
+    console.log(`ScriptReel primary server listening on http://0.0.0.0:${primaryPort} (${isDevSandbox ? "AI Studio dev sandbox" : "Cloud Run production"})`);
   });
-  defaultServer.on("error", (err: any) => {
-    console.warn(`Default port ${DEFAULT_PORT} notice:`, err.message);
+  primaryServer.on("error", (err: any) => {
+    if (err.code === "EADDRINUSE") {
+      console.log(`Primary port ${primaryPort} already active; continuing.`);
+    } else {
+      console.warn(`Primary port ${primaryPort} warning:`, err.message);
+    }
   });
 
-  // Secondary listener on CLOUD_RUN_PORT (typically 8080) for standalone Cloud Run deployments
-  if (CLOUD_RUN_PORT && CLOUD_RUN_PORT !== DEFAULT_PORT) {
+  // Secondary listener (enables dual-compatibility across port 3000 and Cloud Run port)
+  if (secondaryPort !== primaryPort) {
     try {
-      const cloudRunServer = app.listen(CLOUD_RUN_PORT, "0.0.0.0", () => {
-        console.log(`ScriptReel Cloud Run listener active on http://0.0.0.0:${CLOUD_RUN_PORT}`);
+      const secondaryServer = app.listen(secondaryPort, "0.0.0.0", () => {
+        console.log(`ScriptReel secondary server listening on http://0.0.0.0:${secondaryPort}`);
       });
-      cloudRunServer.on("error", (err: any) => {
-        // In local dev container, port 8080 is already bound by Nginx, which is expected
+      secondaryServer.on("error", (err: any) => {
         if (err.code === "EADDRINUSE") {
-          console.log(`Port ${CLOUD_RUN_PORT} already used by container reverse proxy; continuing on port ${DEFAULT_PORT}.`);
+          console.log(`Secondary port ${secondaryPort} already bound; traffic served via port ${primaryPort}.`);
         } else {
-          console.warn(`Cloud Run port ${CLOUD_RUN_PORT} notice:`, err.message);
+          console.warn(`Secondary port ${secondaryPort} warning:`, err.message);
         }
       });
     } catch (e: any) {
-      console.log(`Cloud Run listener notice:`, e?.message);
+      console.log(`Secondary port ${secondaryPort} setup notice:`, e?.message);
     }
   }
 }
